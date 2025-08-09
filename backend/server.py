@@ -5,7 +5,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-AUDIVERIS_BIN = os.environ.get('AUDIVERIS_BIN', '/Applications/Audiveris.app/Contents/MacOS/Audiveris')
+AUDIVERIS_BIN = os.environ.get("AUDIVERIS_BIN", "/opt/audiveris/bin/audiveris")
 
 @app.route('/omr', methods=['POST'])
 def omr():
@@ -41,5 +41,7 @@ def omr():
 
         return send_file(xml_path, mimetype='application/xml')
 
-if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=8000, debug=True)
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 8000))  # Render provides PORT
+    app.run(host="0.0.0.0", port=port)
