@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Photo → Audio Sheet Music</title>
+  <style>
+    :root { --bg:#0f1115; --card:#151922; --muted:#8891a7; --text:#e7ebf3; --acc:#6aa0ff; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    .card { background:var(--card); border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+    input[type=file], select, button, input[type=range] { width:100%; background:#0f1320; color:var(--text); border:1px solid #20273a; border-radius:12px; padding:10px 12px; }
+    button.primary { background: linear-gradient(180deg,#2a69ff,#2053cc); border:none; font-weight:700; }
+    .sheet { background:#fff; border-radius:16px; padding:12px; overflow:auto; }
+    .small { font-size:12px; color:var(--muted); }
+    .pill { padding:6px 10px; border-radius:999px; background:#0f1320; border:1px solid #20273a; }
+  </style>
+  <script src="https://unpkg.com/opensheetmusicdisplay@1.8.7/build/opensheetmusicdisplay.min.js"></script>
+  <script src="https://unpkg.com/osmd-audio-player@0.12.3/dist/osmd-audio-player.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Photo → Audio Sheet Music</h1>
+    <div class="card">
+      <div class="row">
+        <div style="flex:1 1 280px;">
+          <label>Upload photo/PDF of your part</label>
+          <input id="file" type="file" accept="image/*,.pdf" />
+        </div>
+        <div style="flex:1 1 180px;">
+          <label>Tempo</label>
+          <input id="tempo" type="range" min="40" max="220" value="100" />
+          <div class="small"><span id="tempoVal">100</span> BPM</div>
+        </div>
+        <div style="flex:1 1 180px;">
+          <label>Metronome</label>
+          <select id="metronome"><option value="off">Off</option><option value="click">Click</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="play" class="primary" disabled>Play</button>
+        <button id="pause" disabled>Pause</button>
+        <button id="stop" disabled>Stop</button>
+        <span id="status" class="small">Waiting for upload…</span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div id="sheet" class="sheet"></div>
+    </div>
+
+    <!-- NEW: Detected metadata -->
+    <div class="card" style="margin-top:16px;">
+      <div class="row">
+        <div style="flex:1 1 240px;">
+          <div class="small">Detected Key</div>
+          <div id="detKey" style="font-weight:700; font-size:18px;">—</div>
+        </div>
+        <div style="flex:1 1 240px;">
+          <div class="small">Detected Time Signature</div>
+          <div id="detTime" style="font-weight:700; font-size:18px;">—</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="small" style="margin-top:16px;">Tip: Good lighting, straight page, and 200+ DPI help OMR a lot. For multi‑page PDFs, include just your part if possible.</p>
+  </div>
+
+  <script>
+    const OMR_API = (window.OMR_API || 'http://localhost:8000'); // set this when you deploy
+
+    const fileInput = document.getElementById('file');
+    const playBtn = document.getElementById('play');
+    const pauseBtn = document.getElementById('pause');
+    const stopBtn = document.getElementById('stop');
+    const tempo = document.getElementById('tempo');
+    const tempoVal = document.getElementById('tempoVal');
+    const statusEl = document.getElementById('status');
+    const container = document.getElementById('sheet');
+    const detKeyEl = document.getElementById('detKey');
+    const detTimeEl = document.getElementById('detTime');
+
+    let osmd, player, currentXML;
+
+    tempo.addEventListener('input', ()=> tempoVal.textContent = tempo.value);
+
+    async function init() {
+      osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, { autoResize:true, backend:'svg', drawTitle:true });
+      player = new osmdAudioPlayer.OsmdAudioPlayer();
+      playBtn.addEventListener('click', () => player.play({ bpm: Number(tempo.value), fromStart:true }));
+      pauseBtn.addEventListener('click', () => player.pause());
+      stopBtn.addEventListener('click', () => player.stop());
+      document.getElementById('metronome').addEventListener('change', e => player.setMetronome(e.target.value==='click'));
+
+      fileInput.addEventListener('change', async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        await handleUpload(f);
+      });
+    }
+
+    async function handleUpload(file) {
+      statusEl.textContent = 'Uploading to OMR…';
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const res = await fetch(`${OMR_API}/omr`, { method:'POST', body: fd });
+        if (!res.ok) throw new Error(`OMR failed (${res.status})`);
+        const xml = await res.text();
+        currentXML = xml;
+        statusEl.textContent = 'Rendering…';
+        await osmd.load(currentXML);
+        await osmd.render();
+        await player.loadScore(osmd);
+        player.setMetronome(document.getElementById('metronome').value==='click');
+        ;[playBtn, pauseBtn, stopBtn].forEach(b=> b.disabled=false);
+        updateDetectedMeta();
+        statusEl.textContent = 'Ready.';
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    function updateDetectedMeta(){
+      const meta = detectMetaFromMusicXML(currentXML);
+      detKeyEl.textContent = meta.keyName || 'Unknown';
+      detTimeEl.textContent = meta.timeString || 'Unknown';
+    }
+
+    function detectMetaFromMusicXML(xmlText){
+      const out = { keyFifths:null, keyMode:null, keyName:null, beats:null, beatType:null, timeString:null };
+      try{
+        const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+        // Prefer first part/measure for meta; fall back to first occurrence in the document
+        let key = doc.querySelector('part measure attributes key');
+        if (!key) key = doc.querySelector('key');
+        if (key){
+          const fifths = key.querySelector('fifths')?.textContent ?? null;
+          const mode = key.querySelector('mode')?.textContent ?? null;
+          out.keyFifths = fifths !== null ? parseInt(fifths,10) : null;
+          out.keyMode = mode || null;
+          out.keyName = keyNameFromFifths(out.keyFifths, out.keyMode);
+        }
+        let time = doc.querySelector('part measure attributes time');
+        if (!time) time = doc.querySelector('time');
+        if (time){
+          const beats = time.querySelector('beats')?.textContent ?? null;
+          const beatType = time.querySelector('beat-type')?.textContent ?? null;
+          out.beats = beats !== null ? parseInt(beats,10) : null;
+          out.beatType = beatType !== null ? parseInt(beatType,10) : null;
+          if (out.beats && out.beatType) out.timeString = `${out.beats}/${out.beatType}`;
+        }
+      } catch(e){ console.warn('Meta parse failed', e); }
+      return out;
+    }
+
+    function keyNameFromFifths(fifths, mode){
+      if (typeof fifths !== 'number' || isNaN(fifths)) return null;
+      const MAP = {
+        '-7': {maj:'Cb', min:'Ab'}, '-6': {maj:'Gb', min:'Eb'}, '-5': {maj:'Db', min:'Bb'}, '-4': {maj:'Ab', min:'F'},
+        '-3': {maj:'Eb', min:'C'},  '-2': {maj:'Bb', min:'G'},   '-1': {maj:'F',  min:'D'},   '0': {maj:'C', min:'A'},
+         '1': {maj:'G',  min:'E'},   '2': {maj:'D',  min:'B'},   '3': {maj:'A',  min:'F#'},  '4': {maj:'E', min:'C#'},
+         '5': {maj:'B',  min:'G#'},  '6': {maj:'F#', min:'D#'},  '7': {maj:'C#', min:'A#'}
+      };
+      const entry = MAP[String(fifths)] || null;
+      if (!entry) return null;
+      const m = (mode || 'major').toLowerCase();
+      const tonic = m.startsWith('min') ? entry.min : entry.maj;
+      return `${tonic} ${m.startsWith('min') ? 'minor' : 'major'}`;
+    }
+
+    init();
+  </script>
+</body>
+</html>
