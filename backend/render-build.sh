@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-# 1) System deps (Render base images are Debian/Ubuntu-like)
-apt-get update
+# Make apt non-interactive to avoid tzdata/imagemagick prompts
+export DEBIAN_FRONTEND=noninteractive
+
+echo "==> apt-get update"
+# Retry once if mirrors hiccup
+apt-get update || (sleep 3 && apt-get update)
+
+echo "==> apt-get install base packages"
 apt-get install -y --no-install-recommends \
-  curl unzip ca-certificates openjdk-17-jre \
-  tesseract-ocr ghostscript imagemagick
+  ca-certificates curl unzip \
+  openjdk-17-jre tesseract-ocr ghostscript imagemagick \
+  python3-pip
 
-# 2) Audiveris
+echo "==> Verify java"
+java -version
+
+echo "==> Install Audiveris under /opt"
 if [ ! -d "/opt/audiveris" ]; then
-  curl -L https://github.com/Audiveris/audiveris/releases/latest/download/audiveris.zip -o /tmp/audiveris.zip
+  # -fS so curl fails on HTTP errors; retry to avoid transient GitHub CDN failures
+  for i in 1 2 3; do
+    curl -fSL https://github.com/Audiveris/audiveris/releases/latest/download/audiveris.zip -o /tmp/audiveris.zip && break
+    echo "curl failed (try $i), retrying in 5s..."; sleep 5
+  done
   mkdir -p /opt
   unzip -q /tmp/audiveris.zip -d /opt
 fi
 
-# 3) Python deps
-pip install --upgrade pip
-pip install -r backend/requirements.txt
+echo "==> pip install"
+python3 -m pip install --upgrade pip
+python3 -m pip install -r backend/requirements.txt
+
+echo "==> Build step finished"
