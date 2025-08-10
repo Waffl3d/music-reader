@@ -25,7 +25,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Xms256m -Xmx1024m"
 
 # Runtime deps: JRE, OCR stack, PDF tools, fonts, curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Runtime deps (more robust apt with retries + tzdata noninteractive)
+RUN set -eux; \
+  export DEBIAN_FRONTEND=noninteractive; \
+  apt-get -o Acquire::Retries=5 update; \
+  apt-get install -y --no-install-recommends tzdata; \
+  apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     openjdk-17-jre-headless \
     tesseract-ocr \
     ghostscript \
@@ -33,8 +38,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig fonts-dejavu \
     libxi6 libxtst6 \
     python3 python3-pip \
-    curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+    curl ca-certificates; \
+  rm -rf /var/lib/apt/lists/*
+
 
 # Allow PDF/PS/EPS if ImageMagick policy blocks them (be permissive; this is a service box)
 RUN set -eux; \
