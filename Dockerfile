@@ -1,14 +1,12 @@
 # =======================
-#  STAGE 1: Build Audiveris CLI
+# STAGE 1: Build Audiveris CLI (no GUI)
 # =======================
-FROM ubuntu:22.04 AS builder
+FROM debian:bookworm AS builder
 ENV DEBIAN_FRONTEND=noninteractive
-# JDK + build tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jdk git curl unzip ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-
-# Pull Audiveris and build only the CLI (no GUI, no desktop integration)
+RUN apt-get -o Acquire::Retries=5 update && \
+    apt-get install -y --no-install-recommends \
+      openjdk-17-jdk git curl unzip ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 ARG AUDIVERIS_TAG=5.6.2
 WORKDIR /opt
 RUN git clone --depth=1 --branch ${AUDIVERIS_TAG} https://github.com/Audiveris/audiveris.git
@@ -16,60 +14,59 @@ WORKDIR /opt/audiveris/audiveris-cli
 RUN ../gradlew --no-daemon installDist
 
 # =======================
-#  STAGE 2: Runtime (slim, headless)
+# STAGE 2: Runtime (headless)
 # =======================
-FROM ubuntu:22.04
+FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 LANG=C.UTF-8 \
-    PYTHONUNBUFFERED=1 \
-    JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Xms256m -Xmx1024m"
+    PYTHONUNBUFFERED=1
 
-# Runtime deps (Ubuntu 24.04) with retries and noninteractive tzdata
+# Install runtime deps (NO JAVA_TOOL_OPTIONS yet to keep postinsts happy)
 RUN set -eux; \
-  export DEBIAN_FRONTEND=noninteractive; \
   apt-get -o Acquire::Retries=5 update; \
-  apt-get install -y --no-install-recommends tzdata; \
   apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     openjdk-17-jre-headless \
     tesseract-ocr \
     ghostscript \
     imagemagick \
-    fontconfig fonts-dejavu \
+    fontconfig fonts-dejavu-core \
     libxi6 libxtst6 \
     python3 python3-pip \
     curl ca-certificates; \
   rm -rf /var/lib/apt/lists/*
 
-
-
-# Allow PDF/PS/EPS if ImageMagick policy blocks them (be permissive; this is a service box)
+# Allow PDF/PS/EPS in ImageMagick (if blocked by policy)
 RUN set -eux; \
   for f in /etc/ImageMagick-6/policy.xml /etc/ImageMagick/policy.xml; do \
-    if [ -f "$f" ]; then \
-      sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/g' "$f" || true; \
-      sed -i 's/<policy domain="coder" rights="none" pattern="PS" \/>/<policy domain="coder" rights="read|write" pattern="PS" \/>/g' "$f" || true; \
-      sed -i 's/<policy domain="coder" rights="none" pattern="EPS" \/>/<policy domain="coder" rights="read|write" pattern="EPS" \/>/g' "$f" || true; \
-    fi; \
+    [ -f "$f" ] || continue; \
+    sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' "$f" || true; \
+    sed -i 's/rights="none" pattern="PS"/rights="read|write" pattern="PS"/' "$f" || true; \
+    sed -i 's/rights="none" pattern="EPS"/rights="read|write" pattern="EPS"/' "$f" || true; \
   done
 
-# Add Audiveris CLI from builder, expose it on PATH
+# Bring in Audiveris CLI from builder
 ENV AUDIVERIS_HOME=/opt/audiveris-cli \
     AUDIVERIS_BIN=/opt/audiveris-cli/bin/audiveris
 COPY --from=builder /opt/audiveris/audiveris-cli/build/install/audiveris-cli/ ${AUDIVERIS_HOME}/
 RUN ln -s "${AUDIVERIS_BIN}" /usr/local/bin/audiveris && chmod +x "${AUDIVERIS_BIN}"
 
+# Now it’s safe to set Java options
+ENV JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Xms256m -Xmx1024m"
+
 # --- Your Flask app ---
 WORKDIR /app
 COPY backend /app/backend
-# (If you have requirements.txt, prefer that. This keeps it simple.)
+# If you have requirements.txt, prefer that; else install directly:
+# COPY backend/requirements.txt /app/backend/
+# RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt
 RUN python3 -m pip install --no-cache-dir flask flask-cors gunicorn
 
-# Healthcheck for Render
+# Healthcheck
 ENV PORT=8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-# Tunable Gunicorn settings (override in Render env if you like)
+# Tunables
 ENV WEB_CONCURRENCY=2 THREADS=2 TIMEOUT=420
 
 # Run API
