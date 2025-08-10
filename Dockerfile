@@ -1,41 +1,42 @@
-# =======================
-# STAGE 1: Build Audiveris CLI (no GUI)
-# =======================
-FROM debian:bookworm AS builder
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get -o Acquire::Retries=5 update && \
-    apt-get install -y --no-install-recommends \
-      openjdk-17-jdk git curl unzip ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-ARG AUDIVERIS_TAG=5.6.2
-WORKDIR /opt
-RUN git clone --depth=1 --branch ${AUDIVERIS_TAG} https://github.com/Audiveris/audiveris.git
-WORKDIR /opt/audiveris/audiveris-cli
-RUN ../gradlew --no-daemon installDist
+# ========= fetch Audiveris binaries (no postinst) =========
+FROM debian:bookworm-slim AS fetcher
+ARG AUDIVERIS_VER=5.6.2
+ARG AUDIVERIS_DEB=Audiveris-${AUDIVERIS_VER}-ubuntu22.04-x86_64.deb
+ARG AUDIVERIS_URL=https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VER}/${AUDIVERIS_DEB}
 
-# =======================
-# STAGE 2: Runtime (headless)
-# =======================
-FROM debian:bookworm
-ENV DEBIAN_FRONTEND=noninteractive \
-    LC_ALL=C.UTF-8 LANG=C.UTF-8 \
-    PYTHONUNBUFFERED=1
-
-# Install runtime deps (NO JAVA_TOOL_OPTIONS yet to keep postinsts happy)
 RUN set -eux; \
-  apt-get -o Acquire::Retries=5 update; \
-  apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+  apt-get update; \
+  apt-get install -y --no-install-recommends curl ca-certificates dpkg-dev; \
+  rm -rf /var/lib/apt/lists/*
+
+# Download and extract payload from the .deb (skip postinst)
+RUN set -eux; \
+  curl -fSL -H "Accept: application/octet-stream" "$AUDIVERIS_URL" -o /tmp/audiveris.deb; \
+  mkdir -p /tmp/expand; \
+  dpkg-deb -x /tmp/audiveris.deb /tmp/expand; \
+  mv /tmp/expand/opt/audiveris /opt/audiveris; \
+  rm -rf /tmp/expand /tmp/audiveris.deb
+
+# ========= runtime image =========
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Core runtime deps
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
     openjdk-17-jre-headless \
     tesseract-ocr \
     ghostscript \
     imagemagick \
-    fontconfig fonts-dejavu-core \
+    fontconfig fonts-dejavu \
     libxi6 libxtst6 \
     python3 python3-pip \
     curl ca-certificates; \
   rm -rf /var/lib/apt/lists/*
 
-# Allow PDF/PS/EPS in ImageMagick (if blocked by policy)
+# Allow PDFs/PS in ImageMagick (some distros disable by policy)
 RUN set -eux; \
   for f in /etc/ImageMagick-6/policy.xml /etc/ImageMagick/policy.xml; do \
     [ -f "$f" ] || continue; \
@@ -44,30 +45,18 @@ RUN set -eux; \
     sed -i 's/rights="none" pattern="EPS"/rights="read|write" pattern="EPS"/' "$f" || true; \
   done
 
-# Bring in Audiveris CLI from builder
-ENV AUDIVERIS_HOME=/opt/audiveris-cli \
-    AUDIVERIS_BIN=/opt/audiveris-cli/bin/audiveris
-COPY --from=builder /opt/audiveris/audiveris-cli/build/install/audiveris-cli/ ${AUDIVERIS_HOME}/
-RUN ln -s "${AUDIVERIS_BIN}" /usr/local/bin/audiveris && chmod +x "${AUDIVERIS_BIN}"
+# Bring in Audiveris files from fetcher and expose a stable CLI path
+COPY --from=fetcher /opt/audiveris /opt/audiveris
+RUN ln -s /opt/audiveris/bin/audiveris /usr/local/bin/audiveris
 
-# Now it’s safe to set Java options
-ENV JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Xms256m -Xmx1024m"
+ENV AUDIVERIS_BIN=/usr/local/bin/audiveris \
+    JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
 
-# --- Your Flask app ---
+# ---- App code ----
 WORKDIR /app
 COPY backend /app/backend
-# If you have requirements.txt, prefer that; else install directly:
-# COPY backend/requirements.txt /app/backend/
-# RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt
-RUN python3 -m pip install --no-cache-dir flask flask-cors gunicorn
+RUN pip3 install --no-cache-dir flask flask-cors gunicorn
 
-# Healthcheck
+# ---- Run API ----
 ENV PORT=8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
-
-# Tunables
-ENV WEB_CONCURRENCY=2 THREADS=2 TIMEOUT=420
-
-# Run API
-CMD ["bash","-lc","exec gunicorn -w ${WEB_CONCURRENCY} --threads ${THREADS} --timeout ${TIMEOUT} -b 0.0.0.0:${PORT} server:app --chdir backend"]
+CMD ["bash","-lc","exec gunicorn -w 2 -b 0.0.0.0:${PORT} server:app --chdir backend"]
