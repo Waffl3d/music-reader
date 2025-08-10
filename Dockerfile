@@ -3,36 +3,33 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ---- System deps for Audiveris & your Flask API ----
+# Use the JDK (not just JRE) because we build Audiveris from source with Gradle.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jre-headless \
+    openjdk-17-jdk \
     tesseract-ocr \
     ghostscript \
     imagemagick \
     python3 python3-pip \
     curl ca-certificates \
-    # useful for validating .deb files
+    git unzip \
+    libxi6 libxtst6 \
     dpkg-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # (Optional) If ImageMagick blocks PDFs by policy, enable them:
 # RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml || true
 
-# ---- Audiveris installer (.deb) ----
-ARG AUDIVERIS_VER=5.6.2
-ARG AUDIVERIS_DEB=Audiveris-${AUDIVERIS_VER}-ubuntu22.04-x86_64.deb
-ARG AUDIVERIS_URL=https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VER}/${AUDIVERIS_DEB}
+# ---- Audiveris CLI (build from source; avoids .deb postinst issues) ----
+WORKDIR /opt
+# Pin a stable tag; adjust if you want a different release
+RUN git clone --depth=1 --branch 5.6.2 https://github.com/Audiveris/audiveris.git
+WORKDIR /opt/audiveris
+# Build only the CLI distribution (no GUI, no desktop integration)
+RUN ./gradlew --no-daemon :audiveris-cli:installDist
 
-# Download must be a real .deb (≈60–70 MB). Fail if not.
-RUN set -eux; \
-  curl -fSL -H "Accept: application/octet-stream" "$AUDIVERIS_URL" -o /tmp/audiveris.deb; \
-  dpkg-deb -I /tmp/audiveris.deb >/dev/null; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends /tmp/audiveris.deb; \
-  rm -f /tmp/audiveris.deb; \
-  rm -rf /var/lib/apt/lists/*
-
-# Audiveris CLI path
-ENV AUDIVERIS_BIN=/usr/bin/audiveris
+# Expose CLI path (and add a convenience symlink on PATH)
+ENV AUDIVERIS_BIN=/opt/audiveris/audiveris-cli/build/install/audiveris-cli/bin/audiveris
+RUN chmod +x "$AUDIVERIS_BIN" && ln -s "$AUDIVERIS_BIN" /usr/local/bin/audiveris
 
 # ---- App code ----
 WORKDIR /app
