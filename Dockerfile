@@ -1,46 +1,70 @@
-# ---- Base image ----
-FROM ubuntu:22.04
+# =======================
+#  STAGE 1: Build Audiveris CLI
+# =======================
+FROM ubuntu:22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
-
-# ---- System deps for Audiveris & your Flask API ----
-# Use the JDK (not just JRE) because we build Audiveris from source with Gradle.
+# JDK + build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jdk \
+    openjdk-17-jdk git curl unzip ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pull Audiveris and build only the CLI (no GUI, no desktop integration)
+ARG AUDIVERIS_TAG=5.6.2
+WORKDIR /opt
+RUN git clone --depth=1 --branch ${AUDIVERIS_TAG} https://github.com/Audiveris/audiveris.git
+WORKDIR /opt/audiveris/audiveris-cli
+RUN ../gradlew --no-daemon installDist
+
+# =======================
+#  STAGE 2: Runtime (slim, headless)
+# =======================
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive \
+    LC_ALL=C.UTF-8 LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1 \
+    JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Xms256m -Xmx1024m"
+
+# Runtime deps: JRE, OCR stack, PDF tools, fonts, curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-17-jre-headless \
     tesseract-ocr \
     ghostscript \
     imagemagick \
+    fontconfig fonts-dejavu \
+    libxi6 libxtst6 \
     python3 python3-pip \
     curl ca-certificates \
-    git unzip \
-    libxi6 libxtst6 \
-    dpkg-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# (Optional) If ImageMagick blocks PDFs by policy, enable them:
-# RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml || true
+# Allow PDF/PS/EPS if ImageMagick policy blocks them (be permissive; this is a service box)
+RUN set -eux; \
+  for f in /etc/ImageMagick-6/policy.xml /etc/ImageMagick/policy.xml; do \
+    if [ -f "$f" ]; then \
+      sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/g' "$f" || true; \
+      sed -i 's/<policy domain="coder" rights="none" pattern="PS" \/>/<policy domain="coder" rights="read|write" pattern="PS" \/>/g' "$f" || true; \
+      sed -i 's/<policy domain="coder" rights="none" pattern="EPS" \/>/<policy domain="coder" rights="read|write" pattern="EPS" \/>/g' "$f" || true; \
+    fi; \
+  done
 
-# ---- Audiveris CLI (build from source; avoids .deb postinst issues) ----
-WORKDIR /opt
-# Pin a stable tag; adjust if you want a different release
-RUN git clone --depth=1 --branch 5.6.2 https://github.com/Audiveris/audiveris.git
-WORKDIR /opt/audiveris
-# Build only the CLI distribution (no GUI, no desktop integration)
-RUN ./gradlew --no-daemon :audiveris-cli:installDist
+# Add Audiveris CLI from builder, expose it on PATH
+ENV AUDIVERIS_HOME=/opt/audiveris-cli \
+    AUDIVERIS_BIN=/opt/audiveris-cli/bin/audiveris
+COPY --from=builder /opt/audiveris/audiveris-cli/build/install/audiveris-cli/ ${AUDIVERIS_HOME}/
+RUN ln -s "${AUDIVERIS_BIN}" /usr/local/bin/audiveris && chmod +x "${AUDIVERIS_BIN}"
 
-# Expose CLI path (and add a convenience symlink on PATH)
-ENV AUDIVERIS_BIN=/opt/audiveris/audiveris-cli/build/install/audiveris-cli/bin/audiveris
-RUN chmod +x "$AUDIVERIS_BIN" && ln -s "$AUDIVERIS_BIN" /usr/local/bin/audiveris
-
-# ---- App code ----
+# --- Your Flask app ---
 WORKDIR /app
-# If your Flask code lives in backend/, keep this:
 COPY backend /app/backend
+# (If you have requirements.txt, prefer that. This keeps it simple.)
+RUN python3 -m pip install --no-cache-dir flask flask-cors gunicorn
 
-# Python deps (use requirements.txt if you have one)
-# COPY requirements.txt /app/
-# RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install --no-cache-dir flask flask-cors gunicorn
-
-# ---- Run API ----
+# Healthcheck for Render
 ENV PORT=8000
-CMD ["bash", "-lc", "exec gunicorn -w 2 -b 0.0.0.0:${PORT} server:app --chdir backend"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
+
+# Tunable Gunicorn settings (override in Render env if you like)
+ENV WEB_CONCURRENCY=2 THREADS=2 TIMEOUT=420
+
+# Run API
+CMD ["bash","-lc","exec gunicorn -w ${WEB_CONCURRENCY} --threads ${THREADS} --timeout ${TIMEOUT} -b 0.0.0.0:${PORT} server:app --chdir backend"]
